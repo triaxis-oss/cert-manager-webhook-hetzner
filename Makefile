@@ -1,4 +1,4 @@
-IMAGE_NAME := "webhook"
+IMAGE_NAME := "triaxis/cert-manager-webhook-websupport"
 IMAGE_TAG := "latest"
 
 OUT := $(shell pwd)/_out
@@ -6,7 +6,7 @@ OUT := $(shell pwd)/_out
 $(shell mkdir -p "$(OUT)")
 
 verify:
-	go test -v .
+	TEST_SRCDIR=$(PWD) go test -v -count=1 .
 
 build:
 	docker build -t "$(IMAGE_NAME):$(IMAGE_TAG)" .
@@ -14,7 +14,7 @@ build:
 .PHONY: rendered-manifest.yaml
 rendered-manifest.yaml:
 	helm template \
-	    --name example-webhook \
-        --set image.repository=$(IMAGE_NAME) \
-        --set image.tag=$(IMAGE_TAG) \
-        deploy/example-webhook > "$(OUT)/rendered-manifest.yaml"
+	    cert-manager-webhook-websupport \
+	    --set image.repository=$(IMAGE_NAME) \
+	    --set image.tag=$(IMAGE_TAG) \
+	    deploy/cert-manager-webhook-websupport > "$(OUT)/rendered-manifest.yaml"
