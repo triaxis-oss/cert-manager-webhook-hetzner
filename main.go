@@ -2,18 +2,13 @@ package main
 
 import (
 	"bytes"
-	"crypto/hmac"
-	"crypto/sha1"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
 	"strings"
-	"time"
 
 	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,17 +21,21 @@ import (
 
 var GroupName = os.Getenv("GROUP_NAME")
 
-type Record struct {
-	Type    string `json:"type"`
-	ID      int64  `json:"id,omitempty"`
-	Name    string `json:"name"`
-	Content string `json:"content"`
-	TTL     int64  `json:"ttl,omitempty"`
-	Note    string `json:"note,omitempty"`
+type zoneResponseMessage struct {
+	Zones []zoneResponse `json:"zones"`
 }
 
-type Records struct {
-	Items []Record
+type zoneResponse struct {
+	ID string `json:"id"`
+}
+
+type record struct {
+	ID     string `json:"id,omitempty"`
+	Name   string `json:"name"`
+	TTL    uint64 `json:"ttl"`
+	Type   string `json:"type"`
+	Value  string `json:"value"`
+	ZoneID string `json:"zone_id"`
 }
 
 func main() {
@@ -50,19 +49,19 @@ func main() {
 	// webhook, where the Name() method will be used to disambiguate between
 	// the different implementations.
 	cmd.RunWebhookServer(GroupName,
-		&websupportDNSProviderSolver{},
+		&hetznerDNSProviderSolver{},
 	)
 }
 
-// websupportDNSProviderSolver implements the provider-specific logic needed to
+// hetznerDNSProviderSolver implements the provider-specific logic needed to
 // 'present' an ACME challenge TXT record for your own DNS provider.
 // To do so, it must implement the `github.com/jetstack/cert-manager/pkg/acme/webhook.Solver`
 // interface.
-type websupportDNSProviderSolver struct {
+type hetznerDNSProviderSolver struct {
 	client *kubernetes.Clientset
 }
 
-// websupportDNSProviderConfig is a structure that is used to decode into when
+// hetznerDNSProviderConfig is a structure that is used to decode into when
 // solving a DNS01 challenge.
 // This information is provided by cert-manager, and may be a reference to
 // additional configuration that's needed to solve the challenge for this
@@ -76,7 +75,7 @@ type websupportDNSProviderSolver struct {
 // You should not include sensitive information here. If credentials need to
 // be used by your provider here, you should reference a Kubernetes Secret
 // resource and fetch these credentials using a Kubernetes clientset.
-type websupportDNSProviderConfig struct {
+type hetznerDNSProviderConfig struct {
 	// Change the two fields below according to the format of the configuration
 	// to be decoded.
 	// These fields will be set by users in the
@@ -85,8 +84,6 @@ type websupportDNSProviderConfig struct {
 	APIRoot         string
 	APIKeySecretRef cmmeta.SecretKeySelector `json:"apiKeySecretRef"`
 	APIKey          string                   `json:"apiKey"`
-	APISecretRef    cmmeta.SecretKeySelector `json:"apiSecretRef"`
-	APISecret       string                   `json:"apiSecret"`
 }
 
 // Name is used as the name for this DNS solver when referencing it on the ACME
@@ -95,8 +92,8 @@ type websupportDNSProviderConfig struct {
 // solvers configured with the same Name() **so long as they do not co-exist
 // within a single webhook deployment**.
 // For example, `cloudflare` may be used as the name of a solver.
-func (c *websupportDNSProviderSolver) Name() string {
-	return "websupport"
+func (c *hetznerDNSProviderSolver) Name() string {
+	return "hetzner"
 }
 
 // Present is responsible for actually presenting the DNS record with the
@@ -104,30 +101,26 @@ func (c *websupportDNSProviderSolver) Name() string {
 // This method should tolerate being called multiple times with the same value.
 // cert-manager itself will later perform a self check to ensure that the
 // solver has correctly configured the DNS provider.
-func (c *websupportDNSProviderSolver) Present(ch *v1alpha1.ChallengeRequest) error {
+func (c *hetznerDNSProviderSolver) Present(ch *v1alpha1.ChallengeRequest) error {
 	cfg, err := loadConfig(c, ch)
 	if err != nil {
 		return err
 	}
 
-	zone := ch.ResolvedZone
-	name := ch.ResolvedFQDN
-	if strings.HasSuffix(name, "."+zone) {
-		name = name[:len(name)-len(zone)-1]
-	}
-	zone = strings.TrimRight(zone, ".")
-
-	data, err := json.Marshal(Record{
-		Type:    "TXT",
-		Name:    name,
-		Content: ch.Key,
-		TTL:     10,
-	})
+	zoneID, name, err := c.getZoneID(ch, &cfg)
 	if err != nil {
 		return err
 	}
 
-	_, err = c.WSAPI(ch, &cfg, "POST", "/v1/user/self/zone/"+zone+"/record", bytes.NewBuffer(data))
+	record := record{
+		ZoneID: zoneID,
+		Name:   name,
+		TTL:    10,
+		Type:   "TXT",
+		Value:  ch.Key,
+	}
+
+	err = c.callAPI(ch, &cfg, "POST", "/records", record, nil)
 	return err
 }
 
@@ -137,36 +130,33 @@ func (c *websupportDNSProviderSolver) Present(ch *v1alpha1.ChallengeRequest) err
 // value provided on the ChallengeRequest should be cleaned up.
 // This is in order to facilitate multiple DNS validations for the same domain
 // concurrently.
-func (c *websupportDNSProviderSolver) CleanUp(ch *v1alpha1.ChallengeRequest) error {
+func (c *hetznerDNSProviderSolver) CleanUp(ch *v1alpha1.ChallengeRequest) error {
 	cfg, err := loadConfig(c, ch)
 	if err != nil {
 		return err
 	}
 
-	zone := ch.ResolvedZone
-	name := ch.ResolvedFQDN
-	if strings.HasSuffix(name, "."+zone) {
-		name = name[:len(name)-len(zone)-1]
-	}
-	zone = strings.TrimRight(zone, ".")
-
-	var records Records
-
-	recordData, err := c.WSAPI(ch, &cfg, "GET", "/v1/user/self/zone/"+zone+"/record", nil)
-	if err == nil {
-		err = json.Unmarshal(recordData, &records)
-	}
+	zoneID, name, err := c.getZoneID(ch, &cfg)
 	if err != nil {
 		return err
 	}
 
-	var found *Record = nil
+	var recordData struct {
+		Records []record `json:"records"`
+	}
 
-	for _, record := range records.Items {
-		if record.Type == "TXT" && record.Name == name && record.Content == ch.Key {
+	err = c.callAPI(ch, &cfg, "GET", "/records?zone_id="+zoneID, nil, &recordData)
+	if err != nil {
+		return err
+	}
+
+	var found *record = nil
+
+	for _, record := range recordData.Records {
+		if record.Type == "TXT" && record.Name == name && record.Value == ch.Key {
 			found = &record
-			log.Printf("Deleting record ID %d", record.ID)
-			_, err = c.WSAPI(ch, &cfg, "DELETE", fmt.Sprintf("/v1/user/self/zone/%s/record/%d", zone, record.ID), nil)
+			log.Printf("Deleting record ID %s", record.ID)
+			err = c.callAPI(ch, &cfg, "DELETE", "/records/"+record.ID, nil, nil)
 			if err != nil {
 				return err
 			}
@@ -189,7 +179,7 @@ func (c *websupportDNSProviderSolver) CleanUp(ch *v1alpha1.ChallengeRequest) err
 // provider accounts.
 // The stopCh can be used to handle early termination of the webhook, in cases
 // where a SIGTERM or similar signal is sent to the webhook process.
-func (c *websupportDNSProviderSolver) Initialize(kubeClientConfig *rest.Config, stopCh <-chan struct{}) error {
+func (c *hetznerDNSProviderSolver) Initialize(kubeClientConfig *rest.Config, stopCh <-chan struct{}) error {
 	cl, err := kubernetes.NewForConfig(kubeClientConfig)
 	if err != nil {
 		return err
@@ -202,12 +192,12 @@ func (c *websupportDNSProviderSolver) Initialize(kubeClientConfig *rest.Config, 
 
 // loadConfig is a small helper function that decodes JSON configuration into
 // the typed config struct.
-func loadConfig(c *websupportDNSProviderSolver, ch *v1alpha1.ChallengeRequest) (websupportDNSProviderConfig, error) {
-	cfg := websupportDNSProviderConfig{}
+func loadConfig(c *hetznerDNSProviderSolver, ch *v1alpha1.ChallengeRequest) (hetznerDNSProviderConfig, error) {
+	cfg := hetznerDNSProviderConfig{}
 	cfgJSON := ch.Config
 
 	// default values
-	cfg.APIRoot = "https://rest.websupport.sk"
+	cfg.APIRoot = "https://dns.hetzner.com/api/v1"
 
 	// handle the 'base case' where no configuration has been provided
 	if cfgJSON == nil {
@@ -221,69 +211,102 @@ func loadConfig(c *websupportDNSProviderSolver, ch *v1alpha1.ChallengeRequest) (
 	return cfg, nil
 }
 
-func (c *websupportDNSProviderSolver) parseSecret(namespace string, value string, ref *cmmeta.SecretKeySelector) (string, error) {
+func (c *hetznerDNSProviderSolver) parseSecret(namespace string, value string, ref *cmmeta.SecretKeySelector) (string, error) {
 	if value == "" && ref.Name != "" && ref.Key != "" {
 		secret, err := c.client.CoreV1().Secrets(namespace).Get(ref.Name, metav1.GetOptions{})
 		if err != nil {
 			return value, err
 		}
 		value = string(secret.Data[ref.Key])
-		log.Printf("Resolved secret %s:%s:%s: %s", namespace, ref.Name, ref.Key, value)
+		log.Printf("Resolved secret %s:%s:%s", namespace, ref.Name, ref.Key)
 	} else {
-		log.Println("Not resolving secret, value found:", value)
+		log.Println("Not resolving secret, using provided value")
 	}
-	
+
 	return value, nil
 }
 
-func (c *websupportDNSProviderSolver) WSAPI(ch *v1alpha1.ChallengeRequest, cfg *websupportDNSProviderConfig, method string, url string, body io.Reader) ([]byte, error) {
-	now := time.Now().UTC()
+func (c *hetznerDNSProviderSolver) getZoneID(ch *v1alpha1.ChallengeRequest, cfg *hetznerDNSProviderConfig) (string, string, error) {
+	zone := ch.ResolvedZone
+	name := ch.ResolvedFQDN
+	if strings.HasSuffix(name, "."+zone) {
+		name = name[:len(name)-len(zone)-1]
+	}
+	zone = strings.TrimRight(zone, ".")
 
-	secret, err := c.parseSecret(ch.ResourceNamespace, cfg.APISecret, &cfg.APISecretRef)
-	if err != nil {
-		return nil, err
+	if zone == "" {
+		return zone, name, fmt.Errorf("No zone provided in challenge")
 	}
 
-	hash := hmac.New(sha1.New, []byte(secret))
-	canonical := fmt.Sprintf("%s %s %d", method, url, now.Unix())
-	log.Println("WSAPI >>", canonical, secret)
-	hash.Write([]byte(canonical))
-	sig := hex.EncodeToString(hash.Sum(nil))
+	var msg zoneResponseMessage
+	var zoneID string
+
+	err := c.callAPI(ch, cfg, "GET", "/zones?name="+zone, nil, &msg)
+	if err == nil {
+		if len(msg.Zones) == 1 {
+			zoneID = msg.Zones[0].ID
+			log.Printf("Zone %s ID: %s", zone, zoneID)
+		} else {
+			err = fmt.Errorf("Zone not found: %s", zone)
+		}
+	}
+
+	return zoneID, name, err
+}
+
+func (c *hetznerDNSProviderSolver) callAPI(ch *v1alpha1.ChallengeRequest, cfg *hetznerDNSProviderConfig, method string, url string, request interface{}, resp interface{}) error {
+	var body []byte = nil
+	var err error
+
+	if request != nil {
+		body, err = json.Marshal(request)
+		if err != nil {
+			return err
+		}
+		log.Println("API >>", method, url, string(body))
+	} else {
+		log.Println("API >>", method, url)
+	}
 
 	client := &http.Client{}
-	req, err := http.NewRequest(method, cfg.APIRoot+url, body)
+	req, err := http.NewRequest(method, cfg.APIRoot+url, bytes.NewBuffer(body))
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	key, err := c.parseSecret(ch.ResourceNamespace, cfg.APIKey, &cfg.APIKeySecretRef)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	req.SetBasicAuth(key, sig)
-	log.Println("Auth:", key, sig)
-	req.Header.Set("Date", now.Format(time.RFC3339))
+	req.Header.Set("Auth-API-Token", key)
 
-	resp, err := client.Do(req)
+	respData, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	defer resp.Body.Close()
+	defer respData.Body.Close()
 
-	data, err := ioutil.ReadAll(resp.Body)
+	data, err := ioutil.ReadAll(respData.Body)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	if resp.StatusCode/100 != 2 {
-		err = fmt.Errorf("WSAPI !! %d %s", resp.StatusCode, resp.Status)
+	if respData.StatusCode/100 != 2 {
+		err = fmt.Errorf("API !! %d %s", respData.StatusCode, respData.Status)
 		log.Println(err)
-		return nil, err
+		return err
 	}
 
-	log.Printf("Response: %v", string(data))
+	log.Printf("API << %v", string(data))
 
-	return data, nil
+	if resp != nil {
+		err = json.Unmarshal(data, resp)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

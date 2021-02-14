@@ -1,4 +1,4 @@
-IMAGE_NAME := "triaxis/cert-manager-webhook-websupport"
+IMAGE_NAME := "triaxis/cert-manager-webhook-hetzner"
 IMAGE_TAG := "latest"
 
 OUT := $(shell pwd)/_out
@@ -14,7 +14,7 @@ build:
 .PHONY: rendered-manifest.yaml
 rendered-manifest.yaml:
 	helm template \
-	    cert-manager-webhook-websupport \
+	    cert-manager-webhook-hetzner \
 	    --set image.repository=$(IMAGE_NAME) \
 	    --set image.tag=$(IMAGE_TAG) \
-	    deploy/cert-manager-webhook-websupport > "$(OUT)/rendered-manifest.yaml"
+	    deploy/cert-manager-webhook-hetzner > "$(OUT)/rendered-manifest.yaml"

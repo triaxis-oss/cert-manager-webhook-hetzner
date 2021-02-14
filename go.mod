@@ -1,4 +1,4 @@
-module github.com/ssimek/cert-manager-webhook-websupport
+module github.com/ssimek/cert-manager-webhook-hetzner
 
 go 1.13
 

@@ -16,10 +16,10 @@ func TestRunsSuite(t *testing.T) {
 	// snippet of valid configuration that should be included on the
 	// ChallengeRequest passed as part of the test cases.
 
-	fixture := dns.NewFixture(&websupportDNSProviderSolver{},
+	fixture := dns.NewFixture(&hetznerDNSProviderSolver{},
 		dns.SetResolvedZone(zone),
 		dns.SetAllowAmbientCredentials(false),
-		dns.SetManifestPath("testdata/websupport-dns-solver"),
+		dns.SetManifestPath("testdata/hetzner-dns-solver"),
 	)
 
 	fixture.RunConformance(t)

@@ -13,7 +13,7 @@ certManager:
   serviceAccountName: cert-manager
 
 image:
-  repository: triaxis/cert-manager-webhook-websupport
+  repository: triaxis/cert-manager-webhook-hetzner
   tag: latest
   pullPolicy: ""
 
